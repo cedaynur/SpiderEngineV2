@@ -6,7 +6,7 @@ class SearchEngine:
         self.conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
         self.conn.row_factory = sqlite3.Row  # For easier access
 
-    def execute_query(self, query_string, limit=10):
+    def execute_query(self, query_string, limit=10, require_fetched=False):
         """
         Perform full-text search on documents_fts table using FTS5 MATCH operator.
         Returns list of tuples: (relevant_url, origin_url, depth, snippet)
@@ -14,7 +14,11 @@ class SearchEngine:
         Snippet is highlighted text excerpt with <b> tags around matches.
         """
         cursor = self.conn.cursor()
-        query = """
+        
+        # Build query with optional status filter (default: no filter to debug empty results)
+        status_filter = "AND u.status='fetched'" if require_fetched else ""
+        
+        query = f"""
         SELECT u.url as relevant_url,
                p.url as origin_url,
                u.depth,
@@ -24,6 +28,7 @@ class SearchEngine:
         JOIN urls u ON d.url_id = u.id
         LEFT JOIN urls p ON u.parent_url_id = p.id
         WHERE documents_fts MATCH ?
+        {status_filter}
         ORDER BY documents_fts.rank
         LIMIT ?
         """

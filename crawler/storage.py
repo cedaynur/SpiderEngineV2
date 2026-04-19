@@ -18,12 +18,15 @@ class DatabaseManager:
             return
         self._initialized = True
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)        
+        self.conn.isolation_level = None  # Enable autocommit mode        
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA cache_size=-65536")  # 64MB
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self._create_tables_if_not_exist()
+        self.recover_stale_urls()
+        self._fix_fts5_table_if_needed()
 
     def _create_tables_if_not_exist(self):
         # Check if urls table exists
@@ -67,8 +70,8 @@ CREATE TABLE documents (
 CREATE INDEX idx_crawled_at ON documents(crawled_at);
 
 CREATE VIRTUAL TABLE documents_fts USING fts5(
-    title UNINDEXED,
-    content UNINDEXED,
+    title,
+    content,
     url_id UNINDEXED,
     content=documents,
     content_rowid=id
@@ -111,7 +114,57 @@ CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
   VALUES('delete', old.id, old.title, old.content, old.url_id);
 END;
 """)
-            self.conn.commit()
+
+
+    def recover_stale_urls(self):
+        """Recover stale URLs from previous crashes by resetting in_progress to pending"""
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("UPDATE urls SET status = 'pending', last_heartbeat = NULL, started_at = NULL WHERE status = 'in_progress'")
+            recovered = cursor.rowcount
+            if recovered > 0:
+                print(f"Recovered {recovered} stale in_progress URLs to pending")
+
+    def _fix_fts5_table_if_needed(self):
+        """Fix FTS5 table if it was created with UNINDEXED columns (prevents search)"""
+        with self._lock:
+            try:
+                # Try to get FTS5 table info
+                cursor = self.conn.cursor()
+                cursor.execute("PRAGMA table_info(documents_fts)")
+                cols = cursor.fetchall()
+                
+                # Check if content column is indexed  
+                # If the table exists and has the old schema, we need to rebuild it
+                # This is a workaround: drop and recreate the FTS5 table with correct schema
+                has_docs = self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+                
+                if has_docs > 0:
+                    # Rebuild FTS5 index from scratch
+                    try:
+                        print("Rebuilding FTS5 index...")
+                        self.conn.execute("DROP TABLE IF EXISTS documents_fts")
+                        
+                        # Recreate with correct schema (title and content are INDEXED by default)
+                        self.conn.execute("""
+CREATE VIRTUAL TABLE documents_fts USING fts5(
+    title,
+    content,
+    url_id UNINDEXED,
+    content=documents,
+    content_rowid=id
+)""")
+                        
+                        # Re-populate FTS5 from documents table
+                        self.conn.execute("""
+INSERT INTO documents_fts(rowid, title, content, url_id)
+SELECT id, title, content, url_id FROM documents""")
+                        
+                        print(f"FTS5 index rebuilt with {has_docs} documents")
+                    except Exception as e:
+                        print(f"Warning: Could not rebuild FTS5 index: {e}")
+            except Exception as e:
+                print(f"FTS5 diagnostic check: {e}")
 
     def upsert_frontier(self, urls_data):
         """urls_data: list of {'url': str, 'source_url_id': int}"""
@@ -126,12 +179,10 @@ END;
                 "INSERT OR IGNORE INTO frontier (url, url_hash, enqueued_at, source_url_id) VALUES (?, ?, ?, ?)",
                 data
             )
-            self.conn.commit()
 
     def get_crawl_batch(self, limit):
         """Return list of (url_id, url) for pending URLs, mark them in_progress"""
         with self._lock:
-            self.conn.execute("BEGIN")
             rows = self.conn.execute(
                 "SELECT id, url FROM urls WHERE status='pending' LIMIT ?",
                 (limit,)
@@ -144,7 +195,6 @@ END;
                     f"UPDATE urls SET status='in_progress', last_heartbeat=? WHERE id IN ({placeholders})",
                     [now] + ids
                 )
-            self.conn.commit()
             return rows
 
     def complete_crawl(self, url_id, title, content, status_code):
@@ -159,7 +209,6 @@ END;
                 "UPDATE urls SET status='fetched', completed_at=?, http_status=? WHERE id=?",
                 (now, status_code, url_id)
             )
-            self.conn.commit()
 
     def get_stats(self):
         """Return dict with counts"""
@@ -171,6 +220,20 @@ END;
             stats['failed'] = self.conn.execute("SELECT COUNT(*) FROM urls WHERE status='failed'").fetchone()[0]
             stats['frontier'] = self.conn.execute("SELECT COUNT(*) FROM frontier").fetchone()[0]
             return stats
+
+    def get_index_diagnostics(self):
+        """Return diagnostic info about indexing status"""
+        with self._lock:
+            docs_total = self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            docs_fts = self.conn.execute("SELECT COUNT(*) FROM documents_fts").fetchone()[0]
+            docs_fetched = self.conn.execute(
+                "SELECT COUNT(*) FROM documents d JOIN urls u ON d.url_id = u.id WHERE u.status='fetched'"
+            ).fetchone()[0]
+            return {
+                'total_documents': docs_total,
+                'fts5_indexed': docs_fts,
+                'fetched_urls': docs_fetched
+            }
 
     def add_url(self, url, parent_url_id=None, depth=0):
         """Add a URL to the database and frontier if it doesn't exist"""
@@ -200,7 +263,6 @@ END;
                 (url, url_hash, now, parent_url_id)
             )
 
-            self.conn.commit()
             return url_id
 
     def process_frontier_batch(self, limit=10):
@@ -244,5 +306,4 @@ END;
                 url_hashes
             )
 
-            self.conn.commit()
             return len(rows)

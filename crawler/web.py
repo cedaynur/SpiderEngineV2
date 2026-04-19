@@ -8,10 +8,11 @@ from .search import SearchEngine
 
 
 class SpiderEngineHandler(http.server.BaseHTTPRequestHandler):
-    def __init__(self, *args, db_manager=None, search_engine=None, index_callback=None, **kwargs):
+    def __init__(self, *args, db_manager=None, search_engine=None, index_callback=None, coordinator=None, **kwargs):
         self.db_manager = db_manager
         self.search_engine = search_engine
         self.index_callback = index_callback
+        self.coordinator = coordinator
         super().__init__(*args, **kwargs)
 
     def do_GET(self):
@@ -44,10 +45,12 @@ class SpiderEngineHandler(http.server.BaseHTTPRequestHandler):
     def handle_stats(self):
         try:
             stats = self.db_manager.get_stats()
+            # Ensure all values are integers for JSON serialization
             response = {
-                'total_indexed': stats.get('fetched', 0),
-                'queue_depth': stats.get('pending', 0) + stats.get('frontier', 0),
-                'active_workers': stats.get('in_progress', 0)
+                'total_indexed': int(stats.get('fetched', 0)),
+                'queue_depth': int(stats.get('pending', 0)) + int(stats.get('frontier', 0)),
+                'active_workers': int(self.coordinator.get_active_worker_count()),
+                'in_flight': int(stats.get('in_progress', 0))  # In-flight work from DB
             }
             self.send_json_response(response)
         except Exception as e:
@@ -157,7 +160,7 @@ class SpiderEngineHandler(http.server.BaseHTTPRequestHandler):
 
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
         }
@@ -419,6 +422,10 @@ class SpiderEngineHandler(http.server.BaseHTTPRequestHandler):
                 <h3>Active Workers</h3>
                 <div class="value" id="active-workers">-</div>
             </div>
+            <div class="stat-card">
+                <h3>In-Flight Requests</h3>
+                <div class="value" id="in-flight">-</div>
+            </div>
         </div>
 
         <div class="search-section">
@@ -452,9 +459,10 @@ class SpiderEngineHandler(http.server.BaseHTTPRequestHandler):
             try {
                 const response = await fetch('/api/stats');
                 const stats = await response.json();
-                document.getElementById('total-indexed').textContent = stats.total_indexed;
-                document.getElementById('queue-depth').textContent = stats.queue_depth;
-                document.getElementById('active-workers').textContent = stats.active_workers;
+                document.getElementById('total-indexed').textContent = stats.total_indexed || 0;
+                document.getElementById('queue-depth').textContent = stats.queue_depth || 0;
+                document.getElementById('active-workers').textContent = stats.active_workers || 0;
+                document.getElementById('in-flight').textContent = stats.in_flight || 0;
             } catch (error) {
                 console.error('Failed to load stats:', error);
             }
@@ -564,10 +572,11 @@ class SpiderEngineHandler(http.server.BaseHTTPRequestHandler):
 
 
 class WebServer:
-    def __init__(self, db_manager, search_engine, index_callback, port=8080):
+    def __init__(self, db_manager, search_engine, index_callback, coordinator, port=8080):
         self.db_manager = db_manager
         self.search_engine = search_engine
         self.index_callback = index_callback
+        self.coordinator = coordinator
         self.port = port
         self.server = None
 
@@ -575,7 +584,8 @@ class WebServer:
         def handler_class(*args, **kwargs):
             return SpiderEngineHandler(*args, db_manager=self.db_manager,
                                      search_engine=self.search_engine,
-                                     index_callback=self.index_callback, **kwargs)
+                                     index_callback=self.index_callback,
+                                     coordinator=self.coordinator, **kwargs)
         return handler_class
 
     def start(self):

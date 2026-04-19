@@ -31,6 +31,7 @@ class SpiderEngineCoordinator:
             db_manager=self.db_manager,
             search_engine=self.search_engine,
             index_callback=self._index_callback,
+            coordinator=self,
             port=port
         )
 
@@ -97,6 +98,10 @@ class SpiderEngineCoordinator:
 
         # Close search engine
         self.search_engine.close()
+
+    def get_active_worker_count(self):
+        """Return the number of alive worker threads"""
+        return sum(1 for w in self.workers if w.is_alive())
 
         print("Shutdown complete")
 

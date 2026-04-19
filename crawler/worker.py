@@ -12,6 +12,9 @@ from .parser import DefensiveParser
 
 
 class CrawlWorker(threading.Thread):
+    _active_workers = 0
+    _active_workers_lock = threading.Lock()
+
     def __init__(self, task_queue, db_path, timeout=10):
         super().__init__(daemon=True)
         self.task_queue = task_queue
@@ -19,8 +22,15 @@ class CrawlWorker(threading.Thread):
         self.timeout = timeout
         self.parser = DefensiveParser()
 
+    @classmethod
+    def get_active_workers_count(cls):
+        """Get the current number of active workers"""
+        with cls._active_workers_lock:
+            return cls._active_workers
+
     def run(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
+        conn.isolation_level = None  # Enable autocommit mode
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-65536")  # 64MB
@@ -39,15 +49,18 @@ class CrawlWorker(threading.Thread):
         conn.close()
 
     def process_url(self, conn, url_id, url):
-        # Mark as in_progress and set heartbeat
-        now = datetime.now().isoformat()
-        conn.execute(
-            "UPDATE urls SET status='in_progress', last_heartbeat=?, started_at=? WHERE id=?",
-            (now, now, url_id)
-        )
-        conn.commit()
+        # Increment active workers counter at start of task
+        with self._active_workers_lock:
+            self._active_workers += 1
 
         try:
+            # Mark as in_progress and set heartbeat
+            now = datetime.now().isoformat()
+            conn.execute(
+                "UPDATE urls SET status='in_progress', last_heartbeat=?, started_at=? WHERE id=?",
+                (now, now, url_id)
+            )
+
             # Create SSL context that doesn't verify certificates
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
@@ -85,7 +98,6 @@ class CrawlWorker(threading.Thread):
                     "UPDATE urls SET status='fetched', completed_at=?, http_status=? WHERE id=?",
                     (now, http_status, url_id)
                 )
-                conn.commit()
 
         except urllib.error.HTTPError as e:
             self._handle_error(conn, url_id, f"HTTP {e.code}: {e.reason}")
@@ -93,6 +105,10 @@ class CrawlWorker(threading.Thread):
             self._handle_error(conn, url_id, f"URL Error: {e.reason}")
         except Exception as e:
             self._handle_error(conn, url_id, f"Unexpected error: {str(e)}")
+        finally:
+            # Decrement active workers counter - ensures count is accurate even on errors
+            with self._active_workers_lock:
+                self._active_workers = max(0, self._active_workers - 1)
 
     def _handle_error(self, conn, url_id, error_msg):
         now = datetime.now().isoformat()
@@ -101,7 +117,6 @@ class CrawlWorker(threading.Thread):
             "UPDATE urls SET status='failed', error_message=?, completed_at=? WHERE id=?",
             (error_msg, now, url_id)
         )
-        conn.commit()
 
     @staticmethod
     def _extract_title(content):
