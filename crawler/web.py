@@ -446,10 +446,66 @@ class SpiderEngineHandler(http.server.BaseHTTPRequestHandler):
             <div id="index-status"></div>
         </div>
 
-        <div class="results-section">
-            <h2>📊 System Status</h2>
-            <div id="system-status">Loading system status...</div>
-        </div>
+        <script>
+            function refreshStats() {
+                fetch('/api/stats')
+                    .then(response => response.json())
+                    .then(data => {
+                        const statusDiv = document.getElementById('system-status');
+                        // Python'dan gelen key'leri (total_indexed, queue_depth vb.) buraya basıyoruz
+                        statusDiv.innerHTML = `
+                            <div class="stats-grid">
+                                <div class="stat-item">
+                                    <span class="stat-label">Total Indexed</span>
+                                    <span class="stat-value">${data.total_indexed || 0}</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Queue Depth</span>
+                                    <span class="stat-value">${data.queue_depth || 0}</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Active Workers</span>
+                                    <span class="stat-value">${data.active_workers || 0}</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">In-Flight</span>
+                                    <span class="stat-value">${data.in_flight || 0}</span>
+                                </div>
+                            </div>
+                        `;
+                    })
+                    .catch(error => {
+                        console.error('Stats error:', error);
+                        document.getElementById('system-status').innerText = 'System Offline';
+                    });
+            }
+
+            // Her 2 saniyede bir verileri tazele
+            setInterval(refreshStats, 2000);
+            // Sayfa yüklendiğinde hemen çalıştır
+            refreshStats();
+        </script>
+
+        <style>
+            /* Pembe temana uygun şık kutucuklar */
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                gap: 15px;
+                margin-top: 20px;
+            }
+            .stat-item {
+                background: #fff0f5; /* Lavanta Pembesi */
+                padding: 20px;
+                border-radius: 12px;
+                border: 2px solid #ffb6c1;
+                text-align: center;
+                transition: transform 0.3s ease;
+            }
+            .stat-item:hover { transform: translateY(-5px); }
+            .stat-label { display: block; font-size: 0.85rem; color: #d63384; font-weight: bold; text-transform: uppercase; }
+            .stat-value { display: block; font-size: 1.8rem; font-weight: 800; color: #333; margin-top: 5px; }
+        </style>
     </div>
 
     <script>
