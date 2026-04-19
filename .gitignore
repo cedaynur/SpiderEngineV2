@@ -1,0 +1,9 @@
+*.db
+__pycache__/
+*.pyc
+spiderengine.db*
+__pycache__/
+spiderengine.db*
+__pycache__/
+*.pyc
+.DS_Store
